@@ -8,14 +8,15 @@ on:
       repo_gh_id:
         required: true
         type: string
+      workspace_id:
+        required: true
+        type: string
+      in_progress_pipeline_id:
+        required: true
+        type: string
     secrets:
       ZENHUB_TOKEN:
         required: true
-      ZENHUB_WORKSPACE_ID:
-        required: true
-      IN_PROGRESS_PIPELINE_ID:
-        required: true
-
 jobs:
   move-issue:
     runs-on: ubuntu-latest
@@ -23,14 +24,13 @@ jobs:
       - name: Move matching ZenHub issue to In Progress
         env:
           ZENHUB_TOKEN: ${{ secrets.ZENHUB_TOKEN }}
-          ZENHUB_WORKSPACE_ID: ${{ secrets.ZENHUB_WORKSPACE_ID }}
-          IN_PROGRESS_PIPELINE_ID: ${{ secrets.IN_PROGRESS_PIPELINE_ID }}
+          ZENHUB_WORKSPACE_ID: ${{ inputs.workspace_id }}
+          IN_PROGRESS_PIPELINE_ID: ${{ inputs.in_progress_pipeline_id }}
           REPO_GH_ID: ${{ inputs.repo_gh_id }}
           BRANCH_NAME: ${{ inputs.branch_name }}
         run: |
           set -euo pipefail
-          NAME="${BRANCH_NAME##*/}"
-          ISSUE_NUMBER="$(printf '%s' "$NAME" | grep -oE '^[0-9]+' || true)"
+          ISSUE_NUMBER="$(printf '%s' "$BRANCH_NAME" | grep -oE '#[0-9]+' | head -n1 | tr -d '#' || true)"
           [ -z "$ISSUE_NUMBER" ] && { echo "No issue number in '$BRANCH_NAME'. Skipping."; exit 0; }
           API="https://api.zenhub.com/public/graphql"
           LOOKUP=$(jq -n --argjson r "$REPO_GH_ID" --argjson n "$ISSUE_NUMBER" \
