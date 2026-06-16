@@ -1,92 +1,43 @@
-name: ZenHub - branch to In Progress
-
-on: create # fires when a branch (or tag) is created/pushed for the first time
+name: ZenHub move
+on:
+  workflow_call:
+    inputs:
+      branch_name:
+        required: true
+        type: string
+      repo_gh_id:
+        required: true
+        type: string
+    secrets:
+      ZENHUB_TOKEN:
+        required: true
+      ZENHUB_WORKSPACE_ID:
+        required: true
+      IN_PROGRESS_PIPELINE_ID:
+        required: true
 
 jobs:
   move-issue:
-    # only run for branch creation, not tags
-    if: github.event.ref_type == 'branch'
     runs-on: ubuntu-latest
     steps:
       - name: Move matching ZenHub issue to In Progress
         env:
           ZENHUB_TOKEN: ${{ secrets.ZENHUB_TOKEN }}
-          ZENHUB_WORKSPACE_ID: ${{ vars.ZENHUB_WORKSPACE_ID }}
-          IN_PROGRESS_PIPELINE_ID: ${{ vars.ZENHUB_IN_PROGRESS_PIPELINE_ID }}
-          REPO_GH_ID: ${{ github.event.repository.id }} # numeric GitHub repo ID
-          BRANCH_NAME: ${{ github.event.ref }} # e.g. "123-add-login"
+          ZENHUB_WORKSPACE_ID: ${{ secrets.ZENHUB_WORKSPACE_ID }}
+          IN_PROGRESS_PIPELINE_ID: ${{ secrets.IN_PROGRESS_PIPELINE_ID }}
+          REPO_GH_ID: ${{ inputs.repo_gh_id }}
+          BRANCH_NAME: ${{ inputs.branch_name }}
         run: |
           set -euo pipefail
-
-          # --- 1. Extract the leading issue number from the branch name ---
-          # Strips an optional "prefix/" (feature/, fix/, etc.) then grabs
-          # the first run of digits. "feature/123-add-login" -> "123"
           NAME="${BRANCH_NAME##*/}"
           ISSUE_NUMBER="$(printf '%s' "$NAME" | grep -oE '^[0-9]+' || true)"
-
-          if [ -z "$ISSUE_NUMBER" ]; then
-            echo "Branch '$BRANCH_NAME' has no leading issue number. Skipping."
-            exit 0
-          fi
-          echo "Detected issue #$ISSUE_NUMBER"
-
+          [ -z "$ISSUE_NUMBER" ] && { echo "No issue number in '$BRANCH_NAME'. Skipping."; exit 0; }
           API="https://api.zenhub.com/public/graphql"
-
-          # --- 2. Look up the ZenHub issue node ID via issueByInfo ---
-          LOOKUP=$(jq -n \
-            --argjson repoId "$REPO_GH_ID" \
-            --argjson num "$ISSUE_NUMBER" \
-            '{query:"query($repoId:Int!,$num:Int!){issueByInfo(repositoryGhId:$repoId,issueNumber:$num){id title}}",
-              variables:{repoId:$repoId,num:$num}}')
-
-          RESP=$(curl -sS -X POST "$API" \
-            -H "Authorization: Bearer $ZENHUB_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "$LOOKUP")
-
-          echo "Lookup response: $RESP"
+          LOOKUP=$(jq -n --argjson r "$REPO_GH_ID" --argjson n "$ISSUE_NUMBER" \
+            '{query:"query($r:Int!,$n:Int!){issueByInfo(repositoryGhId:$r,issueNumber:$n){id}}",variables:{r:$r,n:$n}}')
+          RESP=$(curl -sS -X POST "$API" -H "Authorization: Bearer $ZENHUB_TOKEN" -H "Content-Type: application/json" -d "$LOOKUP")
           ISSUE_ID=$(printf '%s' "$RESP" | jq -r '.data.issueByInfo.id // empty')
-
-          if [ -z "$ISSUE_ID" ]; then
-            echo "Could not resolve a ZenHub issue for #$ISSUE_NUMBER. Skipping."
-            exit 0
-          fi
-
-          # --- 3. Move the issue into the In Progress pipeline ---
-          MOVE=$(jq -n \
-            --arg issueId "$ISSUE_ID" \
-            --arg pipelineId "$IN_PROGRESS_PIPELINE_ID" \
-            '{query:"mutation($input:MoveIssueInput!){moveIssue(input:$input){issue{id}}}",
-              variables:{input:{pipelineId:$pipelineId,issueId:$issueId,position:0}}}')
-
-          MRESP=$(curl -sS -X POST "$API" \
-            -H "Authorization: Bearer $ZENHUB_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "$MOVE")
-
-          echo "Move response: $MRESP"
-          if printf '%s' "$MRESP" | jq -e '.errors' >/dev/null 2>&1; then
-            echo "ZenHub returned errors — check field names in the Explorer."
-            exit 1
-          fi
-          echo "Moved issue #$ISSUE_NUMBER to In Progress."
-
-# ---------------------------------------------------------------------------
-# HOW TO FIND IDS
-#
-# WORKSPACE ID + PIPELINE ID:
-#   Easiest: open the GraphiQL Explorer at https://developers.zenhub.com,
-#   authenticate with your token, and run a query like:
-#
-#     query {
-#       viewer {
-#         searchWorkspaces(query: "YOUR_WORKSPACE_NAME") {
-#           nodes { id name pipelinesConnection { nodes { id name } } }
-#         }
-#       }
-#     }
-#
-#   Copy the workspace "id" and the "id" of the pipeline named "In Progress".
-#
-# REPO_GH_ID is filled automatically from the GitHub event — no action needed.
-# ---------------------------------------------------------------------------
+          [ -z "$ISSUE_ID" ] && { echo "No ZenHub issue for #$ISSUE_NUMBER. Resp: $RESP"; exit 0; }
+          MOVE=$(jq -n --arg i "$ISSUE_ID" --arg p "$IN_PROGRESS_PIPELINE_ID" \
+            '{query:"mutation($in:MoveIssueInput!){moveIssue(input:$in){issue{id}}}",variables:{in:{pipelineId:$p,issueId:$i,position:0}}}')
+          curl -sS -X POST "$API" -H "Authorization: Bearer $ZENHUB_TOKEN" -H "Content-Type: application/json" -d "$MOVE"
