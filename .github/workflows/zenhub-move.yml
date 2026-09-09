@@ -11,9 +11,14 @@ on:
       workspace_id:
         required: true
         type: string
-      in_progress_pipeline_id:
-        required: true
+      pipeline_id:
+        required: false
         type: string
+        default: ''
+      in_progress_pipeline_id:
+        required: false
+        type: string
+        default: ''
     secrets:
       ZENHUB_TOKEN:
         required: true
@@ -21,23 +26,27 @@ jobs:
   move-issue:
     runs-on: ubuntu-latest
     steps:
-      - name: Move matching ZenHub issue to In Progress
+      - name: Move the issues named in the branch to the target pipeline
         env:
           ZENHUB_TOKEN: ${{ secrets.ZENHUB_TOKEN }}
-          ZENHUB_WORKSPACE_ID: ${{ inputs.workspace_id }}
-          IN_PROGRESS_PIPELINE_ID: ${{ inputs.in_progress_pipeline_id }}
+          TARGET_PIPELINE_ID: ${{ inputs.pipeline_id != '' && inputs.pipeline_id || inputs.in_progress_pipeline_id }}
           REPO_GH_ID: ${{ inputs.repo_gh_id }}
           BRANCH_NAME: ${{ inputs.branch_name }}
         run: |
           set -euo pipefail
-          ISSUE_NUMBER="$(printf '%s' "$BRANCH_NAME" | grep -oE '#[0-9]+' | head -n1 | tr -d '#' || true)"
-          [ -z "$ISSUE_NUMBER" ] && { echo "No issue number in '$BRANCH_NAME'. Skipping."; exit 0; }
+          [ -z "$TARGET_PIPELINE_ID" ] && { echo "No target pipeline id given (pipeline_id or in_progress_pipeline_id)."; exit 1; }
+          ISSUE_NUMBERS="$(printf '%s' "$BRANCH_NAME" | grep -oE '#[0-9]+' | tr -d '#' | sort -un || true)"
+          [ -z "$ISSUE_NUMBERS" ] && { echo "No issue number in '$BRANCH_NAME'. Skipping."; exit 0; }
           API="https://api.zenhub.com/public/graphql"
-          LOOKUP=$(jq -n --argjson r "$REPO_GH_ID" --argjson n "$ISSUE_NUMBER" \
-            '{query:"query($r:Int!,$n:Int!){issueByInfo(repositoryGhId:$r,issueNumber:$n){id}}",variables:{r:$r,n:$n}}')
-          RESP=$(curl -sS -X POST "$API" -H "Authorization: Bearer $ZENHUB_TOKEN" -H "Content-Type: application/json" -d "$LOOKUP")
-          ISSUE_ID=$(printf '%s' "$RESP" | jq -r '.data.issueByInfo.id // empty')
-          [ -z "$ISSUE_ID" ] && { echo "No ZenHub issue for #$ISSUE_NUMBER. Resp: $RESP"; exit 0; }
-          MOVE=$(jq -n --arg i "$ISSUE_ID" --arg p "$IN_PROGRESS_PIPELINE_ID" \
-            '{query:"mutation($in:MoveIssueInput!){moveIssue(input:$in){issue{id}}}",variables:{in:{pipelineId:$p,issueId:$i,position:0}}}')
-          curl -sS -X POST "$API" -H "Authorization: Bearer $ZENHUB_TOKEN" -H "Content-Type: application/json" -d "$MOVE"
+          for ISSUE_NUMBER in $ISSUE_NUMBERS; do
+            LOOKUP=$(jq -n --argjson r "$REPO_GH_ID" --argjson n "$ISSUE_NUMBER" \
+              '{query:"query($r:Int!,$n:Int!){issueByInfo(repositoryGhId:$r,issueNumber:$n){id}}",variables:{r:$r,n:$n}}')
+            RESP=$(curl -sS -X POST "$API" -H "Authorization: Bearer $ZENHUB_TOKEN" -H "Content-Type: application/json" -d "$LOOKUP")
+            ISSUE_ID=$(printf '%s' "$RESP" | jq -r '.data.issueByInfo.id // empty')
+            [ -z "$ISSUE_ID" ] && { echo "No ZenHub issue for #$ISSUE_NUMBER. Resp: $RESP"; continue; }
+            MOVE=$(jq -n --arg i "$ISSUE_ID" --arg p "$TARGET_PIPELINE_ID" \
+              '{query:"mutation($in:MoveIssueInput!){moveIssue(input:$in){issue{id}}}",variables:{in:{pipelineId:$p,issueId:$i,position:0}}}')
+            echo "Moving #$ISSUE_NUMBER"
+            curl -sS -X POST "$API" -H "Authorization: Bearer $ZENHUB_TOKEN" -H "Content-Type: application/json" -d "$MOVE"
+            echo
+          done
