@@ -1,0 +1,52 @@
+name: ZenHub move pipeline
+on:
+  workflow_call:
+    inputs:
+      repo_gh_id:
+        required: true
+        type: string
+      from_pipeline_id:
+        required: true
+        type: string
+      to_pipeline_id:
+        required: true
+        type: string
+    secrets:
+      ZENHUB_TOKEN:
+        required: true
+jobs:
+  move-pipeline-issues:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Move every issue of the repository from one pipeline to another
+        env:
+          ZENHUB_TOKEN: ${{ secrets.ZENHUB_TOKEN }}
+          REPO_GH_ID: ${{ inputs.repo_gh_id }}
+          FROM_PIPELINE_ID: ${{ inputs.from_pipeline_id }}
+          TO_PIPELINE_ID: ${{ inputs.to_pipeline_id }}
+        run: |
+          set -euo pipefail
+          API="https://api.zenhub.com/public/graphql"
+          zh() { curl -sS -X POST "$API" -H "Authorization: Bearer $ZENHUB_TOKEN" -H "Content-Type: application/json" -d "$1"; }
+          ISSUES=""
+          AFTER=""
+          while :; do
+            LIST=$(jq -n --arg p "$FROM_PIPELINE_ID" --argjson r "$REPO_GH_ID" --arg after "$AFTER" \
+              '{query:"query($p:ID!,$r:[Int!],$after:String){searchIssuesByPipeline(pipelineId:$p,filters:{repositoryGhIds:$r},first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{id number}}}",variables:{p:$p,r:[$r],after:(if $after=="" then null else $after end)}}')
+            RESP=$(zh "$LIST")
+            printf '%s' "$RESP" | jq -e '.data.searchIssuesByPipeline' >/dev/null || { echo "Pipeline lookup failed: $RESP"; exit 1; }
+            ISSUES="$ISSUES $(printf '%s' "$RESP" | jq -r '.data.searchIssuesByPipeline.nodes[]|"\(.id):\(.number)"' | tr '\n' ' ')"
+            [ "$(printf '%s' "$RESP" | jq -r '.data.searchIssuesByPipeline.pageInfo.hasNextPage')" = "true" ] || break
+            AFTER=$(printf '%s' "$RESP" | jq -r '.data.searchIssuesByPipeline.pageInfo.endCursor')
+          done
+          ISSUES=$(printf '%s' "$ISSUES" | xargs -n1 2>/dev/null | sort -u || true)
+          [ -z "$ISSUES" ] && { echo "No issues of repository $REPO_GH_ID in the source pipeline. Nothing to move."; exit 0; }
+          for ENTRY in $ISSUES; do
+            ISSUE_ID="${ENTRY%%:*}"
+            NUMBER="${ENTRY##*:}"
+            MOVE=$(jq -n --arg i "$ISSUE_ID" --arg p "$TO_PIPELINE_ID" \
+              '{query:"mutation($in:MoveIssueInput!){moveIssue(input:$in){issue{id}}}",variables:{in:{pipelineId:$p,issueId:$i,position:0}}}')
+            echo "Moving #$NUMBER"
+            zh "$MOVE"
+            echo
+          done
